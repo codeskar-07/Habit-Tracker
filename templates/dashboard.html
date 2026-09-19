@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - Habit Tracker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen">
+    <!-- Navbar -->
+    <nav class="bg-slate-800/80 backdrop-blur-md border-b border-slate-700/50 sticky top-0 z-50">
+        <div class="max-w-4xl mx-auto px-4 py-3 flex justify-between items-center">
+            <div class="flex items-center gap-3">
+                <div class="w-9 h-9 bg-indigo-600 rounded-lg flex items-center justify-center shadow-lg shadow-indigo-500/30">
+                    <i class="fa-solid fa-bolt text-white"></i>
+                </div>
+                <h1 class="font-bold text-lg bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">Habit Tracker</h1>
+            </div>
+            <div class="flex items-center gap-4">
+                <span class="text-sm text-slate-300"><i class="fa-regular fa-circle-user text-indigo-400 mr-1.5"></i>{{ current_user.username }}</span>
+                <a href="{{ url_for('logout') }}" class="text-xs bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5">
+                    <i class="fa-solid fa-arrow-right-from-bracket"></i> Logout
+                </a>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Container -->
+    <main class="max-w-4xl mx-auto px-4 py-8 space-y-6">
+        <!-- Add Habit Form Card -->
+        <div class="bg-slate-800/80 border border-slate-700/50 p-6 rounded-2xl shadow-xl">
+            <h2 class="text-lg font-bold mb-4 flex items-center gap-2">
+                <i class="fa-solid fa-plus text-indigo-400"></i> Add New Habit
+            </h2>
+            <form action="{{ url_for('add_habit') }}" method="POST" class="flex flex-col sm:flex-row gap-3">
+                <input type="text" name="title" placeholder="Habit title (e.g., Read 20 pages)" required 
+                    class="flex-1 bg-slate-900/50 border border-slate-700 rounded-xl px-4 py-2.5 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-colors">
+                <input type="text" name="description" placeholder="Optional details..." 
+                    class="flex-1 bg-slate-900/50 border border-slate-700 rounded-xl px-4 py-2.5 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-colors">
+                <button type="submit" 
+                    class="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-6 py-2.5 rounded-xl shadow-lg shadow-indigo-600/30 transition-all duration-200">
+                    Add Habit
+                </button>
+            </form>
+        </div>
+
+        <!-- Habits List Card -->
+        <div class="bg-slate-800/80 border border-slate-700/50 p-6 rounded-2xl shadow-xl">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-lg font-bold flex items-center gap-2">
+                    <i class="fa-solid fa-calendar-day text-indigo-400"></i> Today's Habits
+                </h2>
+                <span class="text-xs bg-slate-700/50 text-slate-300 px-3 py-1 rounded-full border border-slate-600/50">
+                    {{ today.strftime('%A, %b %d') }}
+                </span>
+            </div>
+
+            {% if habits %}
+                <div class="space-y-3">
+                {% for item in habits %}
+                    <div class="flex items-center justify-between p-4 rounded-xl border transition-all duration-200 {% if item.completed_today %}bg-emerald-950/20 border-emerald-500/30{% else %}bg-slate-900/40 border-slate-700/50 hover:border-slate-600{% endif %}">
+                        <div class="space-y-1">
+                            <h3 class="font-semibold text-slate-100 {% if item.completed_today %}line-through text-slate-400{% endif %}">
+                                {{ item.habit.title }}
+                            </h3>
+                            {% if item.habit.description %}
+                                <p class="text-xs text-slate-400">{{ item.habit.description }}</p>
+                            {% endif %}
+                            <div class="pt-1">
+                                <span class="inline-flex items-center gap-1 text-xs font-bold text-orange-400 bg-orange-500/10 border border-orange-500/20 px-2.5 py-0.5 rounded-full">
+                                    <i class="fa-solid fa-fire text-orange-500"></i> {{ item.streak }} Day Streak
+                                </span>
+                            </div>
+                        </div>
+
+                        <form action="{{ url_for('toggle_habit', habit_id=item.habit.id) }}" method="POST">
+                            <button type="submit" 
+                                class="px-4 py-2 rounded-xl text-sm font-semibold transition-all duration-200 flex items-center gap-2 {% if item.completed_today %}bg-emerald-500 text-white shadow-lg shadow-emerald-500/20 hover:bg-emerald-400{% else %}bg-slate-800 text-slate-300 border border-slate-700 hover:border-indigo-500 hover:text-indigo-400{% endif %}">
+                                {% if item.completed_today %}
+                                    <i class="fa-solid fa-circle-check"></i> Done
+                                {% else %}
+                                    <i class="fa-regular fa-circle"></i> Mark Complete
+                                {% endif %}
+                            </button>
+                        </form>
+                    </div>
+                {% endfor %}
+                </div>
+            {% else %}
+                <div class="text-center py-12 text-slate-500">
+                    <i class="fa-solid fa-list-check text-4xl mb-3 text-slate-600"></i>
+                    <p class="text-sm">No habits created yet. Add your first habit above to get started!</p>
+                </div>
+            {% endif %}
+        </div>
+    </main>
+</body>
+</html>
