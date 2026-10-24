@@ -1,130 +1,250 @@
-from flask import Flask, render_template, redirect, url_for, request, flash
-from flask_login import LoginManager, login_user, logout_user, login_required, current_user
-from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import date, timedelta
-from models import db, User, Habit, HabitLog
+import os
+from datetime import date
+from urllib.parse import urlparse
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'dev-secret-key-123'
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///database.db'
+from dotenv import load_dotenv
+from flask import Flask, flash, redirect, render_template, request, url_for
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from flask_login import LoginManager, current_user, login_required, login_user, logout_user
+from flask_migrate import Migrate
+from flask_wtf import FlaskForm
+from flask_wtf.csrf import CSRFProtect
+from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.security import check_password_hash, generate_password_hash
+from wtforms import PasswordField, StringField
+from wtforms.validators import DataRequired, Email, EqualTo, Length, Regexp
+
+from models import Habit, HabitLog, User, db
+
+load_dotenv()
+
+# On Render, DATABASE_URL is set, so we are in production.
+IS_PROD = "DATABASE_URL" in os.environ
+DB_URL = os.environ.get("DATABASE_URL", "sqlite:///local.db").replace("postgres://", "postgresql://", 1)
+MAX_HABITS = 50
+
+app = Flask(__name__, static_folder="statics")
+if IS_PROD:
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+app.config.update(
+    SECRET_KEY=os.environ["SECRET_KEY"],
+    SQLALCHEMY_DATABASE_URI=DB_URL,
+    SQLALCHEMY_ENGINE_OPTIONS={"pool_pre_ping": True},
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=IS_PROD,
+    REMEMBER_COOKIE_HTTPONLY=True,
+    REMEMBER_COOKIE_SECURE=IS_PROD,
+    MAX_CONTENT_LENGTH=64 * 1024,
+)
 
 db.init_app(app)
+Migrate(app, db)
+CSRFProtect(app)
+limiter = Limiter(get_remote_address, app=app, default_limits=["300 per hour"], storage_uri="memory://")
+
 login_manager = LoginManager(app)
-login_manager.login_view = 'login'
+login_manager.login_view = "login"
+login_manager.login_message = "Log in to see your habits."
+
+# Used so a login for an unknown email takes as long as one for a real email.
+DUMMY_HASH = generate_password_hash("not-a-real-password")
+
 
 @login_manager.user_loader
 def load_user(user_id):
-    return User.query.get(int(user_id))
+    return db.session.get(User, int(user_id))
 
-def calculate_streak(habit_id):
-    logs = HabitLog.query.filter_by(habit_id=habit_id, status=True)\
-                         .order_by(HabitLog.log_date.desc()).all()
-    if not logs:
-        return 0
 
-    streak = 0
-    today = date.today()
-    check_date = today
-    logged_dates = {log.log_date for log in logs}
+@app.after_request
+def security_headers(resp):
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    resp.headers["Content-Security-Policy"] = (
+        "default-src 'self'; style-src 'self' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com; img-src 'self' data:; "
+        "form-action 'self'; frame-ancestors 'none'"
+    )
+    if IS_PROD:
+        resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return resp
 
-    if today not in logged_dates:
-        check_date = today - timedelta(days=1)
-        if check_date not in logged_dates:
-            return 0
 
-    while check_date in logged_dates:
-        streak += 1
-        check_date -= timedelta(days=1)
+# ---------- Forms ----------
+class RegisterForm(FlaskForm):
+    username = StringField(
+        "Username",
+        validators=[
+            DataRequired(),
+            Length(3, 30),
+            Regexp(r"^\w+$", message="Use letters, numbers and underscores only."),
+        ],
+    )
+    email = StringField("Email", validators=[DataRequired(), Email(), Length(max=255)])
+    password = PasswordField("Password", validators=[DataRequired(), Length(10, 128, message="Use at least 10 characters.")])
+    confirm = PasswordField("Confirm password", validators=[DataRequired(), EqualTo("password", message="Passwords don't match.")])
 
-    return streak
 
-@app.route('/')
-@login_required
-def dashboard():
-    habits = Habit.query.filter_by(user_id=current_user.id).all()
-    today = date.today()
-    habit_data = []
+class LoginForm(FlaskForm):
+    email = StringField("Email", validators=[DataRequired(), Email()])
+    password = PasswordField("Password", validators=[DataRequired()])
 
-    for habit in habits:
-        today_log = HabitLog.query.filter_by(habit_id=habit.id, log_date=today).first()
-        is_completed = today_log.status if today_log else False
-        streak = calculate_streak(habit.id)
-        
-        habit_data.append({
-            'habit': habit,
-            'completed_today': is_completed,
-            'streak': streak
-        })
 
-    return render_template('dashboard.html', habits=habit_data, today=today)
+# ---------- Auth ----------
+def is_safe_next(target):
+    if not target:
+        return False
+    parsed = urlparse(target)
+    return not parsed.netloc and not parsed.scheme and target.startswith("/") and not target.startswith("//")
 
-@app.route('/add-habit', methods=['POST'])
-@login_required
-def add_habit():
-    title = request.form.get('title')
-    description = request.form.get('description')
-    if title:
-        new_habit = Habit(title=title, description=description, user_id=current_user.id)
-        db.session.add(new_habit)
-        db.session.commit()
-    return redirect(url_for('dashboard'))
 
-@app.route('/toggle-habit/<int:habit_id>', methods=['POST'])
-@login_required
-def toggle_habit(habit_id):
-    today = date.today()
-    log = HabitLog.query.filter_by(habit_id=habit_id, log_date=today).first()
+@app.route("/")
+def index():
+    return redirect(url_for("dashboard" if current_user.is_authenticated else "login"))
 
-    if log:
-        log.status = not log.status
-    else:
-        log = HabitLog(habit_id=habit_id, log_date=today, status=True)
-        db.session.add(log)
 
-    db.session.commit()
-    return redirect(url_for('dashboard'))
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        user = User.query.filter_by(username=username).first()
-
-        if user and check_password_hash(user.password_hash, password):
-            login_user(user)
-            return redirect(url_for('dashboard'))
-        flash('Invalid username or password')
-
-    return render_template('login.html')
-
-@app.route('/register', methods=['GET', 'POST'])
+@app.route("/register", methods=["GET", "POST"])
+@limiter.limit("5 per hour", methods=["POST"])
 def register():
-    if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
+    if current_user.is_authenticated:
+        return redirect(url_for("dashboard"))
+    form = RegisterForm()
+    if form.validate_on_submit():
+        username = form.username.data.strip()
+        email = form.email.data.strip().lower()
+        taken = User.query.filter(
+            (User.email == email) | (db.func.lower(User.username) == username.lower())
+        ).first()
+        if taken:
+            flash("That username or email is already in use.", "error")
+        else:
+            user = User(username=username, email=email)
+            user.set_password(form.password.data)
+            db.session.add(user)
+            db.session.commit()
+            flash("Account created. Log in to start tracking.", "success")
+            return redirect(url_for("login"))
+    return render_template("register.html", form=form)
 
-        if User.query.filter_by(username=username).first():
-            flash('Username already exists')
-            return redirect(url_for('register'))
 
-        hashed_pw = generate_password_hash(password, method='scrypt')
-        new_user = User(username=username, password_hash=hashed_pw)
-        db.session.add(new_user)
-        db.session.commit()
+@app.route("/login", methods=["GET", "POST"])
+@limiter.limit("10 per minute", methods=["POST"])
+def login():
+    if current_user.is_authenticated:
+        return redirect(url_for("dashboard"))
+    form = LoginForm()
+    if form.validate_on_submit():
+        user = User.query.filter_by(email=form.email.data.strip().lower()).first()
+        if user:
+            ok = user.check_password(form.password.data)
+        else:
+            check_password_hash(DUMMY_HASH, form.password.data)
+            ok = False
+        if ok:
+            login_user(user)
+            nxt = request.args.get("next")
+            return redirect(nxt if is_safe_next(nxt) else url_for("dashboard"))
+        flash("Wrong email or password.", "error")
+    return render_template("login.html", form=form)
 
-        login_user(new_user)
-        return redirect(url_for('dashboard'))
 
-    return render_template('register.html')
-
-@app.route('/logout')
+@app.route("/logout", methods=["POST"])
 @login_required
 def logout():
     logout_user()
-    return redirect(url_for('login'))
+    flash("You are logged out.", "success")
+    return redirect(url_for("login"))
 
-if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
-    app.run(debug=True)
+
+# ---------- Habits ----------
+def get_own_habit(habit_id):
+    # Always filter by the logged-in user so nobody can touch another user's data.
+    return Habit.query.filter_by(id=habit_id, user_id=current_user.id).first_or_404()
+
+
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    today = date.today()
+    habits = Habit.query.filter_by(user_id=current_user.id).order_by(Habit.created_at).all()
+    cards = []
+    for h in habits:
+        current, longest, week, done = h.stats(today)
+        cards.append({"habit": h, "current": current, "longest": longest, "week": week, "done": done})
+    done_count = sum(1 for c in cards if c["done"])
+    return render_template("dashboard.html", cards=cards, today=today, done_count=done_count)
+
+
+@app.route("/habits/add", methods=["POST"])
+@login_required
+def add_habit():
+    name = request.form.get("name", "").strip()
+    if not name or len(name) > 100:
+        flash("Enter a habit name up to 100 characters.", "error")
+    elif Habit.query.filter_by(user_id=current_user.id).count() >= MAX_HABITS:
+        flash(f"You can track up to {MAX_HABITS} habits.", "error")
+    else:
+        db.session.add(Habit(name=name, user_id=current_user.id))
+        db.session.commit()
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/habit/<int:habit_id>/toggle", methods=["POST"])
+@login_required
+def toggle_habit(habit_id):
+    habit = get_own_habit(habit_id)
+    today = date.today()
+    log = HabitLog.query.filter_by(habit_id=habit.id, log_date=today).first()
+    if log:
+        db.session.delete(log)
+    else:
+        db.session.add(HabitLog(habit_id=habit.id, log_date=today))
+    db.session.commit()
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/habit/<int:habit_id>/rename", methods=["POST"])
+@login_required
+def rename_habit(habit_id):
+    habit = get_own_habit(habit_id)
+    name = request.form.get("name", "").strip()
+    if name and len(name) <= 100:
+        habit.name = name
+        db.session.commit()
+    else:
+        flash("Enter a habit name up to 100 characters.", "error")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/habit/<int:habit_id>/delete", methods=["POST"])
+@login_required
+def delete_habit(habit_id):
+    habit = get_own_habit(habit_id)
+    db.session.delete(habit)
+    db.session.commit()
+    flash("Habit deleted.", "success")
+    return redirect(url_for("dashboard"))
+
+
+# ---------- Errors ----------
+@app.errorhandler(404)
+def not_found(e):
+    return render_template("error.html", code=404, message="We couldn't find that page."), 404
+
+
+@app.errorhandler(429)
+def too_many(e):
+    return render_template("error.html", code=429, message="Too many attempts. Wait a minute and try again."), 429
+
+
+@app.errorhandler(500)
+def server_error(e):
+    db.session.rollback()
+    return render_template("error.html", code=500, message="Something went wrong on our side."), 500
+
+
+if __name__ == "__main__":
+    app.run(debug=not IS_PROD)
